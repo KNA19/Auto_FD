@@ -1,4 +1,4 @@
-# AUTO_FD Demo (Tomorrow Meeting Version)
+# AUTO_FD Demo
 
 ## Overview
 
