@@ -105,8 +105,8 @@ def compute_metrics(G, pos, stress_pairs=1200, seed=1):
 # Your Eades baseline (modified: accept init positions + return history)
 # Same log attraction as your baseline code
 # -----------------------------
-def eades_baseline(adj_dict, init_pos, iterations=1000, epsilon=0.01, cooling_factor=0.95,
-                  k_repulsion=2.0, k_spring=1.0, ideal_spring_length=1.0, T0=1.0):
+def eades_baseline(adj_dict, init_pos, iterations=10000, epsilon=0.01, cooling_factor=0.95,
+                  k_repulsion=2.0, k_spring=1.0, ideal_spring_length=1.0, T0=3.0):
     positions = {n: (float(init_pos[n][0]), float(init_pos[n][1])) for n in adj_dict}
     temperature = T0
     hist_max_move = []
@@ -152,8 +152,15 @@ def eades_baseline(adj_dict, init_pos, iterations=1000, epsilon=0.01, cooling_fa
 
         max_move = 0.0
         for u in nodes:
-            dx = forces[u][0] * temperature
-            dy = forces[u][1] * temperature
+            fx, fy = forces[u][0], forces[u][1]
+            fmag = math.hypot(fx, fy) + 1e-12
+
+            # MOVEMENT CAP: move at most 'temperature' per iteration
+            move = min(fmag, temperature)
+
+            dx = (fx / fmag) * move
+            dy = (fy / fmag) * move
+
             max_move = max(max_move, math.hypot(dx, dy))
             positions[u] = (positions[u][0] + dx, positions[u][1] + dy)
 
@@ -174,8 +181,8 @@ def eades_baseline(adj_dict, init_pos, iterations=1000, epsilon=0.01, cooling_fa
 # 2) use SAME log attraction as baseline (so the only real change is temperature rule)
 # 3) clamp temperature so it never becomes negative or collapses too fast
 # -----------------------------
-def eades_adaptive(adj, init_pos, iterations=10000, epsilon=0.02, rate=0.2,
-                  k_rep=2.0, k_spring=1.0, ideal_spring_length=1.0, T0=1.0, Tmin=1e-4):
+def eades_adaptive(adj, init_pos, iterations=10000, epsilon=0.02, rate=0.05,
+                  k_rep=2.0, k_spring=1.0, ideal_spring_length=1.0, T0=3.0, Tmin=1e-4):
     pos = {n: (float(init_pos[n][0]), float(init_pos[n][1])) for n in adj}
     nodes = list(adj.keys())
 
@@ -224,8 +231,15 @@ def eades_adaptive(adj, init_pos, iterations=10000, epsilon=0.02, rate=0.2,
 
         max_move = 0.0
         for u in nodes:
-            dx = F[u][0] * T
-            dy = F[u][1] * T
+            fx, fy = F[u][0], F[u][1]
+            fmag = math.hypot(fx, fy) + 1e-12
+
+            # MOVEMENT CAP: move at most 'T' per iteration
+            move = min(fmag, T)
+
+            dx = (fx / fmag) * move
+            dy = (fy / fmag) * move
+
             max_move = max(max_move, math.hypot(dx, dy))
             pos[u] = (pos[u][0] + dx, pos[u][1] + dy)
 
