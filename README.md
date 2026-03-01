@@ -200,18 +200,3 @@ to produce an aesthetically readable layout under a fixed time/iteration budget.
 * **Step 4 (Evaluation):** Benchmark across diverse graph families, report both quality metrics and runtime budget, and show that automatic selection beats any single fixed method on average.
 
 ---
-
-## How to Re-run
-
-Run the demo script from the project folder using your Python environment.
-The script will regenerate:
-
-* all panel images in `out/`
-* convergence plots in `out/`
-* `out/summary.csv`
-
-Example (adjust if your entry script name differs):
-
-```bash
-python demo_layouts
-```
