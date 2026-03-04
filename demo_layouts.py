@@ -19,6 +19,65 @@ def normalize_pos_dict(pos):
     arr = arr / mx
     return {n: (float(arr[i,0]), float(arr[i,1])) for i, n in enumerate(nodes)}
 
+def run_layout(G, init, algo, iters, seed=7):
+    """
+    Runs one algorithm from the same init positions and returns (pos, hist).
+    pos is a dict node -> (x,y).
+    hist is None for FR/KK, and a dict for Eades variants.
+    """
+    # Build adjacency dict once (needed for Eades variants)
+    adj = {u: list(G.neighbors(u)) for u in G.nodes()}
+
+    if algo == "Eades":
+        pos, hist = eades_baseline(
+            adj, init,
+            iterations=iters,
+            epsilon=0.01,
+            cooling_factor=0.95,
+            T0=3.0
+        )
+        return pos, hist
+
+    if algo == "Adaptive-Eades":
+        pos, hist = eades_adaptive(
+            adj, init,
+            iterations=iters,
+            epsilon=0.02,
+            rate=0.05,
+            T0=3.0
+        )
+        return pos, hist
+
+    if algo == "FR":
+        pos = nx.spring_layout(G, pos=init, seed=seed, iterations=iters)
+        return pos, None
+
+    if algo == "KK":
+        pos = nx.kamada_kawai_layout(G, pos=init)
+        return pos, None
+
+    raise ValueError(f"Unknown algo: {algo}")
+
+
+def run_all_algos(G, init, iters, seed=7):
+    """
+    Runs all 4 algorithms from the same init.
+    Returns:
+      layouts: dict algo_name -> normalized position dict
+      histories: dict algo_name -> history (or None)
+    """
+    layouts = {}
+    histories = {}
+
+    for algo in ["Eades", "Adaptive-Eades", "FR", "KK"]:
+        pos, hist = run_layout(G, init, algo, iters, seed=seed)
+
+        # IMPORTANT: normalize so all layouts are comparable for metrics/plots
+        layouts[algo] = normalize_pos_dict(pos)
+        histories[algo] = hist
+
+    return layouts, histories
+
 def init_positions(nodes, seed=1, low=0.0, high=10.0):
     rng = random.Random(seed)
     return {n: (rng.uniform(low, high), rng.uniform(low, high)) for n in nodes}
@@ -91,14 +150,22 @@ def sampled_stress(G, pos, pairs=1200, seed=1):
         cnt += 1
     return total / max(cnt, 1)
 
+def aspect_ratio_penalty(pos):
+    xs = [pos[n][0] for n in pos]
+    ys = [pos[n][1] for n in pos]
+    w = (max(xs) - min(xs)) + 1e-12
+    h = (max(ys) - min(ys)) + 1e-12
+    ar = w / h
+    return abs(math.log(ar))
+
 def compute_metrics(G, pos, stress_pairs=1200, seed=1):
-    # normalize first to make overlap comparable
-    p = normalize_pos_dict(pos)
-    ov = overlap_penalty(p)
-    cv = edge_length_cv(G, p)
-    st = sampled_stress(G, p, pairs=stress_pairs, seed=seed)
-    score = 5.0*ov + 1.0*cv + 0.2*st
-    return ov, cv, st, score
+    ov = overlap_penalty(pos)
+    cv = edge_length_cv(G, pos)
+    st = sampled_stress(G, pos, pairs=stress_pairs, seed=seed)
+    ar = aspect_ratio_penalty(pos)
+
+    score = 5.0*ov + 1.0*cv + 0.2*st + 0.5*ar
+    return ov, cv, st, ar, score
 
 
 # -----------------------------
@@ -340,48 +407,46 @@ def main():
     graphs = build_graphs(seed=7)
 
     summary_rows = []
+    summary_wide_rows = []
     conv_done = False
 
     seeds_per_graph = 1
     iters = 400
 
     for gname, G in graphs:
-        # adjacency dict from networkx
-        adj = {u: list(G.neighbors(u)) for u in G.nodes()}
-        nodes = list(adj.keys())
+        nodes = list(G.nodes())
 
         for s in range(seeds_per_graph):
             init = init_positions(nodes, seed=100 + s, low=0.0, high=10.0)
 
-            # run your methods (now fair: same init)
-            eades_pos, eades_hist = eades_baseline(adj, init, iterations=iters, epsilon=0.01, cooling_factor=0.95)
-            adap_pos, adap_hist = eades_adaptive(adj, init, iterations=iters, epsilon=0.02, rate=0.2)
+            # run all 4 algorithms consistently
+            layouts, histories = run_all_algos(G, init, iters=iters, seed=7)
 
-            # FR + KK using same init
-            fr_pos = nx.spring_layout(G, pos=init, seed=7, iterations=iters)
-            kk_pos = nx.kamada_kawai_layout(G, pos=init)
-
-            layouts = {
-                "Eades": eades_pos,
-                "Adaptive-Eades": adap_pos,
-                "FR": fr_pos,
-                "KK": kk_pos,
+            metrics_map = {
+                name: compute_metrics(G, layouts[name], stress_pairs=800, seed=7 + s)
+                for name in layouts
             }
 
-            metrics_map = {}
-            for name in layouts:
-                metrics_map[name] = compute_metrics(G, layouts[name], stress_pairs=800, seed=7+s)
+            best_algo = min(metrics_map, key=lambda a: metrics_map[a][-1])  # last element is score
 
-            # panel png
+            summary_wide_rows.append({
+                "graph": gname,
+                "seed": s,
+                "score_Eades": metrics_map["Eades"][-1],
+                "score_Adaptive-Eades": metrics_map["Adaptive-Eades"][-1],
+                "score_FR": metrics_map["FR"][-1],
+                "score_KK": metrics_map["KK"][-1],
+                "best_algo": best_algo
+            })
+
             out_png = os.path.join(out_dir, f"{gname}_seed{s}.png")
             plot_panel(out_png, G, layouts, metrics_map)
 
-            # convergence plot once
             if not conv_done:
-                plot_convergence(os.path.join(out_dir, f"convergence_{gname}_seed{s}.png"), eades_hist, adap_hist)
+                conv_path = os.path.join(out_dir, f"convergence_{gname}_seed{s}.png")
+                plot_convergence(conv_path, histories["Eades"], histories["Adaptive-Eades"])
                 conv_done = True
 
-            # csv rows
             for name, (ov, cv, st, sc) in metrics_map.items():
                 summary_rows.append({
                     "graph": gname,
