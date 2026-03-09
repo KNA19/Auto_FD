@@ -182,9 +182,7 @@ All the following plots are saved in:
 
 ---
 
-# Recommended Meeting Story Order (best narrative)
-
-Use this order to tell a clear “why selection + why probing” story.
+# Results
 
 ---
 
