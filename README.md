@@ -275,6 +275,7 @@ Negative = Eades better, Positive = Adaptive better.
 ![regret by family](out/selector_viz/10_regret_by_family_boxplot.png)
 
 **Message:** most cases are near oracle, but outliers remain — target for probing/dynamics.
+
 ---
 
 ## Proposed End Goal (Research Direction)
