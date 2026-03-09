@@ -1,0 +1,22 @@
+{
+  "mode": "benchmark",
+  "save_panels": false,
+  "save_convergence_once": true,
+  "seeds_per_graph": 10,
+  "iterations": 1000,
+  "stress_pairs": 600,
+  "algorithms": [
+    "Eades",
+    "Adaptive-Eades",
+    "FR",
+    "KK"
+  ],
+  "score_weights": {
+    "W_OVERLAP": 5.0,
+    "W_EDGECV": 1.0,
+    "W_STRESS": 0.2,
+    "W_ASPECT": 0.5
+  },
+  "overlap_radius": 0.04,
+  "notes": "Step-2 benchmark generation for AutoFD (4-algorithm portfolio)"
+}

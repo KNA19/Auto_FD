@@ -1,0 +1,37 @@
+{
+  "feature_columns": [
+    "feat_n",
+    "feat_m",
+    "feat_density",
+    "feat_deg_mean",
+    "feat_deg_std",
+    "feat_deg_max",
+    "feat_n_cc",
+    "feat_lcc_ratio",
+    "feat_avg_clustering",
+    "family_ba",
+    "family_er",
+    "family_grid",
+    "family_tree",
+    "family_ws"
+  ],
+  "score_columns": {
+    "Eades": "score_Eades",
+    "Adaptive-Eades": "score_Adaptive-Eades",
+    "FR": "score_FR",
+    "KK": "score_KK"
+  },
+  "best_fixed_algo_train": "Eades",
+  "train_score_means": {
+    "Eades": 1.636352710163745,
+    "Adaptive-Eades": 2.9124634105452034,
+    "FR": 8.103761303813133,
+    "KK": 3.131971554253591
+  },
+  "test_size": 0.2,
+  "seed": 7,
+  "split": "family_balanced_group_split(instance_id within each family)",
+  "target": "3-class (FR relabeled to best of {Eades, Adaptive-Eades, KK})",
+  "n_train": 330,
+  "n_test": 120
+}

@@ -2,7 +2,8 @@ import os, math, random, csv
 import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
-
+from itertools import combinations
+import json
 
 # -----------------------------
 # Utilities
@@ -89,16 +90,22 @@ def euclid(p, q):
 # -----------------------------
 # Metrics (simple + demo-friendly)
 # -----------------------------
-def overlap_penalty(pos, r=0.04):
+OVERLAP_RADIUS = 0.04
+W_OVERLAP = 5.0
+W_EDGECV  = 1.0
+W_STRESS  = 0.2
+W_ASPECT  = 0.5
+
+def overlap_penalty(pos, r=OVERLAP_RADIUS):
     # nodes as circles radius r in normalized space
     nodes = list(pos.keys())
     arr = np.array([pos[n] for n in nodes], dtype=float)
     n = len(nodes)
     pen = 0.0
     for i in range(n):
-        for j in range(i+1, n):
-            d = math.hypot(arr[i,0]-arr[j,0], arr[i,1]-arr[j,1])
-            pen += max(0.0, 2.0*r - d)
+        for j in range(i + 1, n):
+            d = math.hypot(arr[i, 0] - arr[j, 0], arr[i, 1] - arr[j, 1])
+            pen += max(0.0, 2.0 * r - d)
     return pen
 
 def edge_length_cv(G, pos):
@@ -111,43 +118,67 @@ def edge_length_cv(G, pos):
     return float(np.std(lens) / (np.mean(lens) + 1e-12))
 
 def sampled_stress(G, pos, pairs=1200, seed=1):
-    # stress ~ mean over sampled pairs of (||xi-xj|| - L*dG)^2 / dG^2
-    # L = mean edge length (so 1 hop ~ L)
+    """
+    Weighted sampled stress on the largest connected component (if disconnected).
+
+    pos is assumed normalized.
+    Uses unique unordered pairs for more stable estimates.
+    """
     if G.number_of_nodes() <= 1:
         return 0.0
+
+    # Evaluate stress on largest connected component only (simple + stable)
     if not nx.is_connected(G):
-        # keep it simple for tomorrow: evaluate on largest CC
         cc = max(nx.connected_components(G), key=len)
         G = G.subgraph(cc).copy()
         pos = {n: pos[n] for n in G.nodes()}
 
     nodes = list(G.nodes())
+    n = len(nodes)
+    if n <= 1:
+        return 0.0
+
+    # All-pairs shortest-path distances (fine for your current graph sizes)
     sp = dict(nx.all_pairs_shortest_path_length(G))
 
-    # scale L from mean edge length
-    el = []
-    for u, v in G.edges():
-        el.append(euclid(pos[u], pos[v]))
+    # Scale factor L = mean edge length (so 1-hop ~ L)
+    el = [euclid(pos[u], pos[v]) for u, v in G.edges()]
     L = float(np.mean(el)) if el else 1.0
 
-    rng = random.Random(seed)
+    total_pairs_avail = n * (n - 1) // 2
+
+    # If requested pairs >= all pairs, compute exact over all unordered pairs
+    if pairs is None or pairs >= total_pairs_avail:
+        pair_list = [(a, b) for a, b in combinations(nodes, 2)]
+    else:
+        rng = random.Random(seed)
+        idx_map = list(range(n))
+        seen = set()
+
+        # Sample unique unordered pairs (i, j) with i < j
+        # Use a bounded attempt count to avoid infinite loops if pairs is large
+        max_attempts = max(10 * pairs, 1000)
+        attempts = 0
+        while len(seen) < pairs and attempts < max_attempts:
+            i, j = rng.sample(idx_map, 2)
+            if i > j:
+                i, j = j, i
+            seen.add((i, j))
+            attempts += 1
+
+        pair_list = [(nodes[i], nodes[j]) for (i, j) in seen]
+
     total = 0.0
     cnt = 0
-    n = len(nodes)
-    for _ in range(pairs):
-        a = nodes[rng.randrange(n)]
-        b = nodes[rng.randrange(n)]
-        if a == b:
-            continue
-        if b not in sp.get(a, {}):
-            continue
-        dg = sp[a][b]
+    for a, b in pair_list:
+        dg = sp[a][b]  # connected because we reduced to largest CC if needed
         if dg <= 0:
             continue
         de = euclid(pos[a], pos[b])
         diff = de - L * dg
-        total += (diff*diff) / (dg*dg + 1e-12)
+        total += (diff * diff) / (dg * dg + 1e-12)
         cnt += 1
+
     return total / max(cnt, 1)
 
 def aspect_ratio_penalty(pos):
@@ -159,14 +190,46 @@ def aspect_ratio_penalty(pos):
     return abs(math.log(ar))
 
 def compute_metrics(G, pos, stress_pairs=1200, seed=1):
+    # pos is already normalized in run_all_algos()
     ov = overlap_penalty(pos)
     cv = edge_length_cv(G, pos)
     st = sampled_stress(G, pos, pairs=stress_pairs, seed=seed)
     ar = aspect_ratio_penalty(pos)
 
-    score = 5.0*ov + 1.0*cv + 0.2*st + 0.5*ar
+    score = W_OVERLAP * ov + W_EDGECV * cv + W_STRESS * st + W_ASPECT * ar
     return ov, cv, st, ar, score
 
+def extract_graph_features(G):
+    n = G.number_of_nodes()
+    m = G.number_of_edges()
+    dens = nx.density(G) if n > 1 else 0.0
+
+    degs = [d for _, d in G.degree()]
+    if len(degs) == 0:
+        deg_mean = deg_std = deg_max = 0.0
+    else:
+        arr = np.array(degs, dtype=float)
+        deg_mean = float(np.mean(arr))
+        deg_std  = float(np.std(arr))
+        deg_max  = float(np.max(arr))
+
+    n_cc = nx.number_connected_components(G) if n > 0 else 0
+    largest_cc = max((len(c) for c in nx.connected_components(G)), default=0) if n > 0 else 0
+    lcc_ratio = (largest_cc / n) if n > 0 else 0.0
+
+    avg_clust = float(nx.average_clustering(G)) if n > 1 else 0.0
+
+    return {
+        "feat_n": n,
+        "feat_m": m,
+        "feat_density": dens,
+        "feat_deg_mean": deg_mean,
+        "feat_deg_std": deg_std,
+        "feat_deg_max": deg_max,
+        "feat_n_cc": n_cc,
+        "feat_lcc_ratio": lcc_ratio,
+        "feat_avg_clustering": avg_clust,
+    }
 
 # -----------------------------
 # Your Eades baseline (modified: accept init positions + return history)
@@ -332,49 +395,196 @@ def eades_adaptive(adj, init_pos, iterations=10000, epsilon=0.02, rate=0.05,
 # -----------------------------
 # Demo graphs
 # -----------------------------
-def build_graphs(seed=7):
-    graphs = []
+def build_benchmark_graphs(base_seed=7, mode="benchmark"):
+    """
+    Returns a list of graph items (dicts), each containing:
+      {
+        "gname": str,
+        "family": str,
+        "n_nodes": int,
+        "graph_seed": int or None,
+        "graph_params": str,
+        "G": nx.Graph
+      }
+    """
+    items = []
 
-    G = nx.grid_2d_graph(10, 10)
-    G = nx.convert_node_labels_to_integers(G)
-    graphs.append(("grid_10x10", G))
+    # -------------------------
+    # Configure benchmark scale
+    # -------------------------
+    if mode == "demo":
+        # Small version (close to your current setup)
+        # One graph per family
+        configs = [
+            ("grid", {"sizes": [100]}),
+            ("tree", {"sizes": [120], "repeats": 1}),
+            ("er",   {"sizes": [120], "p_list": [0.04], "repeats": 1}),
+            ("ba",   {"sizes": [150], "m_list": [2], "repeats": 1}),
+            ("ws",   {"sizes": [150], "k_list": [4], "beta_list": [0.20], "repeats": 1}),
+        ]
+    else:
+        # Step-2 benchmark mode (moderate, practical)
+        configs = [
+            ("grid", {"sizes": [49, 100, 144]}),  # 7x7, 10x10, 12x12 (approx)
+            ("tree", {"sizes": [50, 100, 150], "repeats": 2}),
+            ("er",   {"sizes": [80, 120, 160], "p_list": [0.03, 0.04], "repeats": 2}),
+            ("ba",   {"sizes": [80, 120, 160], "m_list": [2, 3], "repeats": 2}),
+            ("ws",   {"sizes": [80, 120, 160], "k_list": [4, 6], "beta_list": [0.20], "repeats": 2}),
+        ]
 
-    # FIX: random_tree removed in NX 3.4+
-    G = nx.random_labeled_tree(120, seed=seed)
-    graphs.append(("tree_120", G))
+    # helper: stable topology seed generator
+    def topo_seed(*vals):
+        # simple deterministic combiner
+        h = 1469598103934665603
+        for v in vals:
+            s = str(v)
+            for ch in s:
+                h ^= ord(ch)
+                h *= 1099511628211
+                h &= 0xFFFFFFFFFFFFFFFF
+        return (base_seed + h) % (2**31 - 1)
 
-    G = nx.gnp_random_graph(120, 0.04, seed=seed)
-    if not nx.is_connected(G):
-        G = G.subgraph(max(nx.connected_components(G), key=len)).copy()
-    graphs.append(("erdos_120_p004", G))
+    # -------------------------
+    # Build graph families
+    # -------------------------
+    for family, cfg in configs:
+        if family == "grid":
+            for n_target in cfg["sizes"]:
+                # make a near-square grid
+                side = int(round(math.sqrt(n_target)))
+                side = max(2, side)
+                G = nx.grid_2d_graph(side, side)
+                G = nx.convert_node_labels_to_integers(G)
 
-    G = nx.barabasi_albert_graph(150, 2, seed=seed)
-    graphs.append(("ba_150_m2", G))
+                n = G.number_of_nodes()
+                m = G.number_of_edges()
+                gname = f"grid_{side}x{side}"
+                items.append({
+                    "gname": gname,
+                    "family": "grid",
+                    "n_nodes": n,
+                    "n_edges": m,
+                    "graph_seed": None,
+                    "graph_params": f"rows={side},cols={side}",
+                    "G": G
+                })
 
-    G = nx.watts_strogatz_graph(150, 4, 0.20, seed=seed)
-    if not nx.is_connected(G):
-        G = G.subgraph(max(nx.connected_components(G), key=len)).copy()
-    graphs.append(("ws_150_k4_p020", G))
+        elif family == "tree":
+            repeats = cfg.get("repeats", 1)
+            for n in cfg["sizes"]:
+                for r in range(repeats):
+                    gseed = topo_seed("tree", n, r)
+                    # NetworkX 3.4+: random_tree removed; use random_labeled_tree
+                    G = nx.random_labeled_tree(n, seed=gseed)
+                    m = G.number_of_edges()
+                    gname = f"tree_n{n}_rep{r}"
+                    items.append({
+                        "gname": gname,
+                        "family": "tree",
+                        "n_nodes": n,
+                        "n_edges": m,
+                        "graph_seed": gseed,
+                        "graph_params": "random_labeled_tree",
+                        "G": G
+                    })
 
-    return graphs
+        elif family == "er":
+            repeats = cfg.get("repeats", 1)
+            for n in cfg["sizes"]:
+                for p in cfg["p_list"]:
+                    for r in range(repeats):
+                        gseed = topo_seed("er", n, p, r)
+                        G = nx.gnp_random_graph(n, p, seed=gseed)
+                        # keep largest CC for consistency of graph instances (optional)
+                        if G.number_of_nodes() > 0 and not nx.is_connected(G):
+                            G = G.subgraph(max(nx.connected_components(G), key=len)).copy()
+                        n_eff = G.number_of_nodes()
+                        m_eff = G.number_of_edges()
+                        gname = f"er_n{n}_p{str(p).replace('.', '')}_rep{r}"
+                        items.append({
+                            "gname": gname,
+                            "family": "er",
+                            "n_nodes": n_eff,
+                            "n_edges": m_eff,
+                            "graph_seed": gseed,
+                            "graph_params": f"n={n},p={p}",
+                            "G": G
+                        })
+
+        elif family == "ba":
+            repeats = cfg.get("repeats", 1)
+            for n in cfg["sizes"]:
+                for m_attach in cfg["m_list"]:
+                    if m_attach >= n:
+                        continue
+                    for r in range(repeats):
+                        gseed = topo_seed("ba", n, m_attach, r)
+                        G = nx.barabasi_albert_graph(n, m_attach, seed=gseed)
+                        n_eff = G.number_of_nodes()
+                        m_eff = G.number_of_edges()
+                        gname = f"ba_n{n}_m{m_attach}_rep{r}"
+                        items.append({
+                            "gname": gname,
+                            "family": "ba",
+                            "n_nodes": n_eff,
+                            "n_edges": m_eff,
+                            "graph_seed": gseed,
+                            "graph_params": f"n={n},m={m_attach}",
+                            "G": G
+                        })
+
+        elif family == "ws":
+            repeats = cfg.get("repeats", 1)
+            for n in cfg["sizes"]:
+                for k in cfg["k_list"]:
+                    if k >= n or k % 2 == 1:
+                        continue
+                    for beta in cfg["beta_list"]:
+                        for r in range(repeats):
+                            gseed = topo_seed("ws", n, k, beta, r)
+                            G = nx.watts_strogatz_graph(n, k, beta, seed=gseed)
+                            if G.number_of_nodes() > 0 and not nx.is_connected(G):
+                                G = G.subgraph(max(nx.connected_components(G), key=len)).copy()
+                            n_eff = G.number_of_nodes()
+                            m_eff = G.number_of_edges()
+                            gname = f"ws_n{n}_k{k}_b{str(beta).replace('.', '')}_rep{r}"
+                            items.append({
+                                "gname": gname,
+                                "family": "ws",
+                                "n_nodes": n_eff,
+                                "n_edges": m_eff,
+                                "graph_seed": gseed,
+                                "graph_params": f"n={n},k={k},beta={beta}",
+                                "G": G
+                            })
+
+        else:
+            raise ValueError(f"Unknown family config: {family}")
+
+    return items
 
 
 # -----------------------------
 # Plotting
 # -----------------------------
 def plot_panel(out_png, G, layouts, metrics_map):
-    # layouts: dict name -> pos dict
+    # layouts: dict name -> normalized pos dict
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     axes = axes.flatten()
 
     order = ["Eades", "Adaptive-Eades", "FR", "KK"]
     for ax, name in zip(axes, order):
-        pos = normalize_pos_dict(layouts[name])
+        pos = layouts[name]  # already normalized in run_all_algos()
         nx.draw_networkx_edges(G, pos, ax=ax, width=0.6, alpha=0.5)
         nx.draw_networkx_nodes(G, pos, ax=ax, node_size=35)
 
-        ov, cv, st, sc = metrics_map[name]
-        ax.set_title(f"{name}\noverlap={ov:.3f}  edgeCV={cv:.3f}  stress={st:.3f}\nscore={sc:.3f}")
+        # Step-1 metrics now include aspect ratio penalty
+        ov, cv, st, ar, sc = metrics_map[name]
+        ax.set_title(
+            f"{name}\n"
+            f"overlap={ov:.3f}  edgeCV={cv:.3f}  stress={st:.3f}  aspect={ar:.3f}\n"
+            f"score={sc:.3f}"
+        )
         ax.set_axis_off()
         ax.set_aspect("equal")
 
@@ -404,75 +614,232 @@ def main():
     out_dir = "out"
     ensure_dir(out_dir)
 
-    graphs = build_graphs(seed=7)
+    # -------------------------
+    # Step-2 run mode / settings
+    # -------------------------
+    mode = "benchmark"   # "demo" or "benchmark"
+    save_panels = False  # False for faster Step-2 dataset generation
+    save_convergence_once = True
+
+    # Budgets
+    seeds_per_graph = 10 if mode == "benchmark" else 1
+    iters = 1000
+    stress_pairs = 600 if mode == "benchmark" else 800
+
+    # Build benchmark graphs (with metadata)
+    graph_items = build_benchmark_graphs(base_seed=7, mode=mode)
 
     summary_rows = []
     summary_wide_rows = []
     conv_done = False
 
-    seeds_per_graph = 1
-    iters = 400
+    # -------------------------
+    # Main benchmark loop
+    # -------------------------
+    for g_idx, item in enumerate(graph_items):
+        gname = item["gname"]
+        family = item["family"]
+        graph_seed = item["graph_seed"]
+        graph_params = item["graph_params"]
+        G = item["G"]
 
-    for gname, G in graphs:
         nodes = list(G.nodes())
+        n_nodes = G.number_of_nodes()
+        n_edges = G.number_of_edges()
+
+        feats = extract_graph_features(G)
+
+        # group id for leakage-free splitting later
+        # use graph_seed if available, else gname is fine
+        instance_id = f"{gname}|gseed={graph_seed}"
 
         for s in range(seeds_per_graph):
-            init = init_positions(nodes, seed=100 + s, low=0.0, high=10.0)
+            init_seed = 10000 + 100 * g_idx + s  # deterministic + distinct seed per (graph instance, seed index)
+            init = init_positions(nodes, seed=init_seed, low=0.0, high=10.0)
 
-            # run all 4 algorithms consistently
+            # run all 4 algorithms consistently (same init, same iters)
             layouts, histories = run_all_algos(G, init, iters=iters, seed=7)
 
+            # Deterministic + fair stress sampling seed per (graph instance, init seed)
+            stress_seed = 10000 + 100 * g_idx + s
+
             metrics_map = {
-                name: compute_metrics(G, layouts[name], stress_pairs=800, seed=7 + s)
+                name: compute_metrics(G, layouts[name], stress_pairs=stress_pairs, seed=stress_seed)
                 for name in layouts
             }
 
-            best_algo = min(metrics_map, key=lambda a: metrics_map[a][-1])  # last element is score
+            # best algorithm label for this (graph, init seed)
+            best_algo = min(metrics_map, key=lambda a: metrics_map[a][-1])  # last element = score
 
+            # -------------------------
+            # Wide summary row (one row per graph+seed)
+            # -------------------------
             summary_wide_rows.append({
                 "graph": gname,
-                "seed": s,
+                "family": family,
+                "n_nodes": n_nodes,
+                "n_edges": n_edges,
+                "graph_seed": graph_seed,
+                "graph_params": graph_params,
+                "init_seed": init_seed,
+                "stress_seed": stress_seed,
                 "score_Eades": metrics_map["Eades"][-1],
                 "score_Adaptive-Eades": metrics_map["Adaptive-Eades"][-1],
                 "score_FR": metrics_map["FR"][-1],
                 "score_KK": metrics_map["KK"][-1],
-                "best_algo": best_algo
+                "best_algo": best_algo,
+                "instance_id": instance_id,
+                **feats
             })
 
-            out_png = os.path.join(out_dir, f"{gname}_seed{s}.png")
-            plot_panel(out_png, G, layouts, metrics_map)
+            # -------------------------
+            # Optional panel image saving (Step-2 usually off for speed)
+            # -------------------------
+            if save_panels:
+                out_png = os.path.join(out_dir, f"{gname}_seed{s}.png")
+                plot_panel(out_png, G, layouts, metrics_map)
 
-            if not conv_done:
+            # save one convergence plot only (optional)
+            if save_convergence_once and (not conv_done):
                 conv_path = os.path.join(out_dir, f"convergence_{gname}_seed{s}.png")
                 plot_convergence(conv_path, histories["Eades"], histories["Adaptive-Eades"])
                 conv_done = True
 
-            for name, (ov, cv, st, sc) in metrics_map.items():
+            # -------------------------
+            # Long summary rows (one row per algorithm)
+            # metrics tuple = (ov, cv, st, ar, score)
+            # -------------------------
+            for name, (ov, cv, st, ar, sc) in metrics_map.items():
                 summary_rows.append({
                     "graph": gname,
-                    "seed": s,
+                    "family": family,
+                    "n_nodes": n_nodes,
+                    "n_edges": n_edges,
+                    "graph_seed": graph_seed,
+                    "graph_params": graph_params,
+                    "seed": s,          # legacy seed index
+                    "init_seed": init_seed,
+                    "stress_seed": stress_seed,
                     "algo": name,
                     "overlap": ov,
                     "edge_cv": cv,
                     "stress": st,
-                    "score": sc
+                    "aspect": ar,
+                    "score": sc,
+                    "instance_id": instance_id,
+                    **feats
                 })
 
-    # write summary.csv
+    # -------------------------
+    # Write long summary.csv
+    # -------------------------
+    
+    feature_fields = [
+    "feat_n","feat_m","feat_density","feat_deg_mean","feat_deg_std","feat_deg_max",
+    "feat_n_cc","feat_lcc_ratio","feat_avg_clustering"
+    ]
+
     csv_path = os.path.join(out_dir, "summary.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["graph","seed","algo","overlap","edge_cv","stress","score"])
+        w = csv.DictWriter(
+            f,
+            fieldnames = [
+                "graph","family","n_nodes","n_edges","graph_seed","graph_params",
+                "seed","init_seed","stress_seed",
+                "instance_id",
+                *feature_fields,
+                "algo","overlap","edge_cv","stress","aspect","score"
+            ]
+        )
         w.writeheader()
         for r in summary_rows:
             w.writerow(r)
 
+    # -------------------------
+    # Write wide summary_wide.csv
+    # -------------------------
+    wide_path = os.path.join(out_dir, "summary_wide.csv")
+    with open(wide_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames = [
+                "graph","family","n_nodes","n_edges","graph_seed","graph_params",
+                "init_seed","stress_seed",
+                "instance_id",
+                *feature_fields,
+                "score_Eades","score_Adaptive-Eades","score_FR","score_KK",
+                "best_algo"
+            ]
+        )
+        w.writeheader()
+        for r in summary_wide_rows:
+            w.writerow(r)
+
+    # -------------------------
+    # Write run_config.json (reproducibility manifest)
+    # -------------------------
+    cfg_path = os.path.join(out_dir, "run_config.json")
+    run_cfg = {
+        "mode": mode,
+        "save_panels": save_panels,
+        "save_convergence_once": save_convergence_once,
+        "seeds_per_graph": seeds_per_graph,
+        "iterations": iters,
+        "stress_pairs": stress_pairs,
+        "algorithms": ["Eades", "Adaptive-Eades", "FR", "KK"],
+        "score_weights": {
+            "W_OVERLAP": W_OVERLAP,
+            "W_EDGECV": W_EDGECV,
+            "W_STRESS": W_STRESS,
+            "W_ASPECT": W_ASPECT
+        },
+        "overlap_radius": OVERLAP_RADIUS,
+        "notes": "Step-2 benchmark generation for AutoFD (4-algorithm portfolio)"
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(run_cfg, f, indent=2)
+
+    # -------------------------
+    # Aggregate summaries (quick sanity checks)
+    # -------------------------
+    # Win counts from wide rows
+    win_counts = {}
+    for r in summary_wide_rows:
+        win_counts[r["best_algo"]] = win_counts.get(r["best_algo"], 0) + 1
+
+    # Average score by algorithm from long rows
+    algo_to_scores = {}
+    for r in summary_rows:
+        algo_to_scores.setdefault(r["algo"], []).append(r["score"])
+
     print("Done.")
     print("See outputs in:", os.path.abspath(out_dir))
     print("Key files:")
-    print(" - panel images: *.png")
-    print(" - convergence plot: convergence_*.png")
     print(" - summary csv:", os.path.abspath(csv_path))
+    print(" - summary wide csv:", os.path.abspath(wide_path))
+    print(" - run config:", os.path.abspath(cfg_path))
+    if save_panels:
+        print(" - panel images: *.png")
+    if save_convergence_once:
+        print(" - convergence plot: convergence_*.png")
 
+    print("\nBenchmark summary:")
+    print(f" - graph instances: {len(graph_items)}")
+    print(f" - init seeds per graph: {seeds_per_graph}")
+    print(f" - labeled rows (wide): {len(summary_wide_rows)}")
+    print(f" - rows (long): {len(summary_rows)}")
+
+    print("\nWin counts (best_algo):")
+    for algo in ["Eades", "Adaptive-Eades", "FR", "KK"]:
+        print(f" - {algo}: {win_counts.get(algo, 0)}")
+
+    print("\nAverage score by algorithm:")
+    for algo in ["Eades", "Adaptive-Eades", "FR", "KK"]:
+        vals = algo_to_scores.get(algo, [])
+        if vals:
+            print(f" - {algo}: {sum(vals)/len(vals):.4f} (n={len(vals)})")
+        else:
+            print(f" - {algo}: n=0")
 
 if __name__ == "__main__":
     main()

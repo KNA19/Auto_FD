@@ -1,0 +1,19 @@
+{
+  "n_train": 330,
+  "n_test": 120,
+  "acc": 0.7166666666666667,
+  "balanced_acc": 0.7083333333333334,
+  "macro_f1": 0.6880257298367146,
+  "best_fixed_algo": "Eades",
+  "train_mean_scores": {
+    "Eades": 1.636352710163745,
+    "Adaptive-Eades": 2.9124634105452034,
+    "FR": 8.103761303813133,
+    "KK": 3.131971554253591
+  },
+  "avg_pred_score": 1.1923433405456085,
+  "avg_oracle_score": 1.144836372980668,
+  "avg_regret": 0.04750696756494045,
+  "avg_improvement_vs_fixed": 0.14251738251940818,
+  "notes": "If Eades vs Adaptive score differences overlap heavily vs static features, add probe/dynamic features."
+}
