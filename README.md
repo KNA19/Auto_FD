@@ -1,7 +1,3 @@
-Below is an updated **README.md** you can paste directly. It keeps your original demo story, and adds the **Step-3 selector results + selector_viz plots** in the best narrative order (the same order I suggested for your meeting).
-
----
-
 # AUTO_FD (v1)
 
 ## Overview
